@@ -585,31 +585,31 @@ class MOVADenoisingStage(PipelineStage):
                                     enable_cfg_parallel,
                                 )
 
-                        if idx_step + 1 < total_steps:
-                            next_pair_t = paired_timesteps[idx_step + 1]
-                            if getattr(next_pair_t, "shape", None) == (2,):
-                                next_timestep, next_audio_timestep = next_pair_t
-                            else:
-                                next_timestep = next_pair_t
-                                next_audio_timestep = next_pair_t
+                    if idx_step + 1 < total_steps:
+                        next_pair_t = paired_timesteps[idx_step + 1]
+                        if getattr(next_pair_t, "shape", None) == (2,):
+                            next_timestep, next_audio_timestep = next_pair_t
                         else:
-                            next_timestep = None
-                            next_audio_timestep = None
+                            next_timestep = next_pair_t
+                            next_audio_timestep = next_pair_t
+                    else:
+                        next_timestep = None
+                        next_audio_timestep = None
 
-                        batch.latents = self.scheduler.step_from_to(
-                            visual_noise_pred,
-                            timestep,
-                            next_timestep,
-                            batch.latents,
-                            **extra_step_kwargs,
-                        )
-                        batch.audio_latents = self.scheduler.step_from_to(
-                            audio_noise_pred,
-                            audio_timestep,
-                            next_audio_timestep,
-                            batch.audio_latents,
-                            **extra_step_kwargs,
-                        )
+                    batch.latents = self.scheduler.step_from_to(
+                        visual_noise_pred,
+                        timestep,
+                        next_timestep,
+                        batch.latents,
+                        **extra_step_kwargs,
+                    )
+                    batch.audio_latents = self.scheduler.step_from_to(
+                        audio_noise_pred,
+                        audio_timestep,
+                        next_audio_timestep,
+                        batch.audio_latents,
+                        **extra_step_kwargs,
+                    )
 
                     if progress_bar is not None:
                         progress_bar.update()
