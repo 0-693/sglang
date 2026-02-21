@@ -156,8 +156,8 @@ class MOVADenoisingStage(PipelineStage):
 
     @property
     def parallelism_type(self) -> StageParallelismType:
-        # Always REPLICATED: CFG parallel is handled internally (pos/neg split
-        # + cfg_model_parallel_all_reduce), matching the Wan/SGLang paradigm.
+        if get_global_server_args().enable_cfg_parallel:
+            return StageParallelismType.CFG_PARALLEL
         return StageParallelismType.REPLICATED
 
     def _predict(
@@ -198,7 +198,6 @@ class MOVADenoisingStage(PipelineStage):
             partial = guidance_scale * pos
         else:
             partial = (1 - guidance_scale) * neg
-        partial = partial.contiguous()
         return cfg_model_parallel_all_reduce(partial)
 
     def compile_module_with_torch_compile(self, module, server_args: ServerArgs):
@@ -391,19 +390,8 @@ class MOVADenoisingStage(PipelineStage):
         total_steps = paired_timesteps.shape[0]
         cfg_rank = get_classifier_free_guidance_rank()
         enable_cfg_parallel = server_args.enable_cfg_parallel
-        is_warmup = batch.is_warmup
 
-        if not is_warmup:
-            if enable_cfg_parallel and batch.do_classifier_free_guidance:
-                logger.info(
-                    "[MOVADenoisingStage] CFG parallel enabled (cfg_rank=%s: %s)",
-                    cfg_rank,
-                    "positive/cond only" if cfg_rank == 0 else "negative/uncond only",
-                )
-            elif batch.do_classifier_free_guidance:
-                logger.info(
-                    "[MOVADenoisingStage] CFG parallel disabled, computing both pos and neg (serial CFG)"
-                )
+        is_warmup = batch.is_warmup
         extra_step_kwargs = self.prepare_extra_func_kwargs(
             self.scheduler.step_from_to,
             getattr(batch, "extra_step_kwargs", None) or {},
@@ -456,10 +444,6 @@ class MOVADenoisingStage(PipelineStage):
                         )
                     else:
                         if enable_cfg_parallel:
-                            # CFG Parallel: rank 0 computes positive (cond),
-                            # rank 1 computes negative (uncond), then
-                            # _cfg_combine does partial*scale + all-reduce
-                            # to produce the final noise prediction on all ranks.
                             if cfg_rank == 0:
                                 pos = self._predict(
                                     cur_visual_dit,
@@ -490,42 +474,6 @@ class MOVADenoisingStage(PipelineStage):
                                     attn_metadata,
                                     batch,
                                 )
-
-                            # Combine pos/neg via partial contribution + all-reduce
-                            # _cfg_combine handles: rank0 -> s*pos, rank1 -> (1-s)*neg,
-                            # then cfg_model_parallel_all_reduce to get final prediction.
-                            visual_noise_pred = self._cfg_combine(
-                                pos[0],
-                                neg[0],
-                                batch.guidance_scale,
-                                cfg_rank,
-                                enable_cfg_parallel,
-                            )
-                            audio_noise_pred = self._cfg_combine(
-                                pos[1],
-                                neg[1],
-                                batch.guidance_scale,
-                                cfg_rank,
-                                enable_cfg_parallel,
-                            )
-
-                            # Optional: guidance rescale (aligns variance of CFG
-                            # output back to the conditional prediction's scale)
-                            if batch.guidance_rescale > 0.0:
-                                visual_noise_pred = self._apply_guidance_rescale(
-                                    visual_noise_pred,
-                                    pos[0] if pos[0] is not None else None,
-                                    batch.guidance_rescale,
-                                    cfg_rank,
-                                    enable_cfg_parallel,
-                                )
-                                audio_noise_pred = self._apply_guidance_rescale(
-                                    audio_noise_pred,
-                                    pos[1] if pos[1] is not None else None,
-                                    batch.guidance_rescale,
-                                    cfg_rank,
-                                    enable_cfg_parallel,
-                                )
                         else:
                             pos = self._predict(
                                 cur_visual_dit,
@@ -554,36 +502,36 @@ class MOVADenoisingStage(PipelineStage):
                                 batch,
                             )
 
-                            visual_noise_pred = self._cfg_combine(
-                                pos[0] if pos[0] is not None else neg[0],
-                                neg[0] if neg[0] is not None else pos[0],
-                                batch.guidance_scale,
-                                cfg_rank,
-                                enable_cfg_parallel,
-                            )
-                            audio_noise_pred = self._cfg_combine(
-                                pos[1] if pos[1] is not None else neg[1],
-                                neg[1] if neg[1] is not None else pos[1],
-                                batch.guidance_scale,
-                                cfg_rank,
-                                enable_cfg_parallel,
-                            )
+                        visual_noise_pred = self._cfg_combine(
+                            pos[0] if pos[0] is not None else neg[0],
+                            neg[0] if neg[0] is not None else pos[0],
+                            batch.guidance_scale,
+                            cfg_rank,
+                            enable_cfg_parallel,
+                        )
+                        audio_noise_pred = self._cfg_combine(
+                            pos[1] if pos[1] is not None else neg[1],
+                            neg[1] if neg[1] is not None else pos[1],
+                            batch.guidance_scale,
+                            cfg_rank,
+                            enable_cfg_parallel,
+                        )
 
-                            if batch.guidance_rescale > 0.0:
-                                visual_noise_pred = self._apply_guidance_rescale(
-                                    visual_noise_pred,
-                                    pos[0] if pos[0] is not None else None,
-                                    batch.guidance_rescale,
-                                    cfg_rank,
-                                    enable_cfg_parallel,
-                                )
-                                audio_noise_pred = self._apply_guidance_rescale(
-                                    audio_noise_pred,
-                                    pos[1] if pos[1] is not None else None,
-                                    batch.guidance_rescale,
-                                    cfg_rank,
-                                    enable_cfg_parallel,
-                                )
+                        if batch.guidance_rescale > 0.0:
+                            visual_noise_pred = self._apply_guidance_rescale(
+                                visual_noise_pred,
+                                pos[0] if pos[0] is not None else None,
+                                batch.guidance_rescale,
+                                cfg_rank,
+                                enable_cfg_parallel,
+                            )
+                            audio_noise_pred = self._apply_guidance_rescale(
+                                audio_noise_pred,
+                                pos[1] if pos[1] is not None else None,
+                                batch.guidance_rescale,
+                                cfg_rank,
+                                enable_cfg_parallel,
+                            )
 
                     if idx_step + 1 < total_steps:
                         next_pair_t = paired_timesteps[idx_step + 1]
@@ -703,7 +651,7 @@ class MOVADenoisingStage(PipelineStage):
         - Before unpatchify, sequences are gathered back
         """
         model_dtype = visual_dit.time_embedding.fc_in.weight.dtype
-        device = get_local_torch_device()
+        device = visual_latents.device
 
         visual_context = context.to(device=device, dtype=model_dtype)
         audio_context = context.to(device=device, dtype=model_dtype)
