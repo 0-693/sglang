@@ -374,10 +374,27 @@ class MOVADenoisingStage(PipelineStage):
             )
         return self.rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale)
 
+    def _ensure_bridge_on_device(self):
+        """Move the dual-tower bridge to the local CUDA device if needed.
+
+        The bridge uses nn.ModuleDict (not ModuleList), so
+        LayerwiseOffloadManager.configure_layerwise_offload silently skips it.
+        We must move it explicitly before the denoising loop.
+        """
+        if self.dual_tower_bridge is None:
+            return
+        try:
+            first_param = next(self.dual_tower_bridge.parameters())
+        except StopIteration:
+            return
+        if first_param.device.type != "cuda":
+            self.dual_tower_bridge.to(get_local_torch_device())
+
     @torch.no_grad()
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         self._maybe_compile_dits(server_args)
         self._manage_device_placement(self.audio_dit, None, server_args)
+        self._ensure_bridge_on_device()
 
         paired_timesteps = batch.paired_timesteps
         if paired_timesteps is None:
@@ -409,16 +426,13 @@ class MOVADenoisingStage(PipelineStage):
             getattr(batch, "extra_step_kwargs", None) or {},
         )
 
-        timings = getattr(batch, "timings", None)
-        perf_dump_path_provided = getattr(batch, "perf_dump_path", None) is not None
-
         with self.progress_bar(total=total_steps) as progress_bar:
             for idx_step in range(total_steps):
                 with StageProfiler(
                     f"denoising_step_{idx_step}",
                     logger=logger,
-                    timings=timings,
-                    perf_dump_path_provided=perf_dump_path_provided,
+                    metrics=batch.metrics,
+                    perf_dump_path_provided=batch.perf_dump_path is not None,
                 ):
                     pair_t = paired_timesteps[idx_step]
                     if getattr(pair_t, "shape", None) == (2,):
@@ -616,7 +630,10 @@ class MOVADenoisingStage(PipelineStage):
                     if not is_warmup and hasattr(self, "step_profile"):
                         self.step_profile()
 
-        for dit in filter(None, [self.video_dit, self.video_dit_2, self.audio_dit]):
+        for dit in filter(
+            None,
+            [self.video_dit, self.video_dit_2, self.audio_dit, self.dual_tower_bridge],
+        ):
             if isinstance(dit, OffloadableDiTMixin):
                 dit.prepare_for_next_req()
 
@@ -958,6 +975,6 @@ class MOVADecodingStage(PipelineStage):
             output=video,
             audio=audio,
             audio_sample_rate=getattr(self.audio_vae, "sample_rate", None),
-            timings=batch.timings,
+            metrics=batch.metrics,
         )
         return output_batch
