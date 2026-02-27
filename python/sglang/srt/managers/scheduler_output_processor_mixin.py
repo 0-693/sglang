@@ -331,6 +331,7 @@ class SchedulerOutputProcessorMixin:
             self.log_prefill_stats(
                 prefill_stats=batch.prefill_stats,
                 can_run_cuda_graph=can_run_cuda_graph,
+                dp_cooperation_info=batch.dp_cooperation_info,
             )
 
     def _resolve_spec_overlap_token_ids(
@@ -410,6 +411,7 @@ class SchedulerOutputProcessorMixin:
             self.log_prefill_stats(
                 prefill_stats=batch.prefill_stats,
                 can_run_cuda_graph=can_run_cuda_graph,
+                dp_cooperation_info=batch.dp_cooperation_info,
             )
 
     def process_batch_result_decode(
@@ -1122,7 +1124,7 @@ class SchedulerOutputProcessorMixin:
                     for k, v in req.customized_info.items():
                         if k not in customized_info:
                             customized_info[k] = []
-                        customized_info[k].append(v)
+                        customized_info[k].append(v[send_token_offset:])
 
             if (
                 req.finished()
