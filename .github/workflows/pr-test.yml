@@ -478,17 +478,8 @@ jobs:
   # =============================================== PR Gate ====================================================
   call-gate:
     needs: check-changes
-    # Skip for scheduled runs (they run all tests) and when target_stage is specified
-    if: |
-      github.event_name != 'schedule' &&
-      inputs.test_parallel_dispatch != true &&
-      !inputs.target_stage &&
-      (
-        needs.check-changes.outputs.main_package == 'true' ||
-        needs.check-changes.outputs.sgl_kernel == 'true' ||
-        needs.check-changes.outputs.jit_kernel == 'true' ||
-        needs.check-changes.outputs.multimodal_gen == 'true'
-      )
+    # Disabled: skip gate checks on fork to allow CI testing without run-ci label
+    if: false
     uses: ./.github/workflows/pr-gate.yml
     secrets: inherit
 
@@ -1224,7 +1215,8 @@ jobs:
           needs.check-changes.outputs.multimodal_gen == 'true'
         )
       )
-    runs-on: 2-gpu-runner
+    # Use self-hosted to match runner label; upstream uses 2-gpu-runner
+    runs-on: self-hosted
     timeout-minutes: 240
     strategy:
       fail-fast: false
